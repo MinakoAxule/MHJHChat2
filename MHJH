@@ -1,4 +1,4 @@
-/ (root of your GitHub repo)
+/ 
 ├── package.json
 ├── server.js
 ├── Procfile
@@ -8,28 +8,6 @@
     ├── index.html
     ├── style.css
     └── script.js
-MHJHChat2/
-│
-├── server.js
-├── package.json
-├── Procfile
-├── koyeb.yaml
-├── .gitignore
-└── public/
-    ├── index.html
-    ├── script.js
-    └── style.css
-MHJHChat2/
-│
-├── server.js
-├── package.json
-├── Procfile
-├── koyeb.yaml
-├── .gitignore
-└── public/
-    ├── index.html
-    ├── script.js
-    └── style.css
 import express from "express";
 import http from "http";
 import { Server } from "socket.io";

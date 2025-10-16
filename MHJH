@@ -1,3 +1,13 @@
+/ (root of your GitHub repo)
+├── package.json
+├── server.js
+├── Procfile
+├── koyeb.yaml
+├── .gitignore
+└── public/
+    ├── index.html
+    ├── style.css
+    └── script.js
 MHJHChat2/
 │
 ├── server.js

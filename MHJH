@@ -1,0 +1,719 @@
+mkdir realtime-social-chat && cd realtime-social-chat
+git init
+cat > package.json <<'EOF'
+{
+  "name": "realtime-social-chat",
+  "version": "1.0.0",
+  "description": "Realtime chat + profiles + 1:1 audio/video calling using Express, Socket.IO and WebRTC",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  },
+  "license": "MIT"
+}
+EOF
+cat > server.js <<'EOF'
+/**
+ * server.js
+ * Express static server + Socket.IO signaling for chat + WebRTC calls
+ */
+
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const path = require('path');
+require('dotenv').config();
+
+const app = express();
+const server = http.createServer(app);
+
+// Create Socket.IO server
+const io = new Server(server, {
+  cors: { origin: '*' }
+});
+
+// Serve static files from `public`
+app.use(express.static(path.join(__dirname, 'public')));
+
+// In-memory map of connected users: socketId -> { user, discriminator, avatarColor, meta... }
+const users = new Map();
+
+/**
+ * Helper: broadcast user list to everyone
+ */
+function emitUserList() {
+  const list = Array.from(users.entries()).map(([id, info]) => {
+    return { id, user: info.user, discriminator: info.discriminator, color: info.color, bio: info.bio || '' };
+  });
+  io.emit('users', list);
+}
+
+io.on('connection', (socket) => {
+  console.log('connect', socket.id);
+
+  // When a client sets/updates their profile
+  socket.on('profile:update', (profile) => {
+    const p = {
+      user: (profile && profile.user) ? String(profile.user).slice(0, 32) : 'Anon',
+      discriminator: (profile && profile.discriminator) ? String(profile.discriminator).slice(0,6) : ('0000'),
+      color: (profile && profile.color) ? String(profile.color) : '#888',
+      bio: (profile && profile.bio) ? String(profile.bio).slice(0,160) : ''
+    };
+    users.set(socket.id, p);
+    emitUserList();
+
+    // Broadcast join event to others
+    socket.broadcast.emit('user:joined', { id: socket.id, user: p.user, discriminator: p.discriminator, timestamp: new Date().toISOString() });
+  });
+
+  // Chat message (simple broadcast)
+  socket.on('chat:message', (msg) => {
+    if (!msg || !msg.text) return;
+    const info = users.get(socket.id) || { user: 'Anon', discriminator: '0000', color: '#888' };
+    const payload = {
+      id: socket.id,
+      user: info.user,
+      discriminator: info.discriminator,
+      color: info.color,
+      text: String(msg.text),
+      timestamp: new Date().toISOString()
+    };
+    io.emit('chat:message', payload);
+  });
+
+  // Typing indicator
+  socket.on('chat:typing', (isTyping) => {
+    const info = users.get(socket.id) || { user: 'Anon', discriminator: '0000' };
+    socket.broadcast.emit('chat:typing', { id: socket.id, user: info.user, discriminator: info.discriminator, typing: !!isTyping });
+  });
+
+  //
+  // WebRTC signaling events for 1:1 calls
+  //
+  socket.on('webrtc:offer', (data) => {
+    // data: { to: targetSocketId, offer }
+    if (data && data.to && data.offer) {
+      io.to(data.to).emit('webrtc:offer', { from: socket.id, offer: data.offer });
+    }
+  });
+
+  socket.on('webrtc:answer', (data) => {
+    // data: { to, answer }
+    if (data && data.to && data.answer) {
+      io.to(data.to).emit('webrtc:answer', { from: socket.id, answer: data.answer });
+    }
+  });
+
+  socket.on('webrtc:ice', (data) => {
+    // data: { to, candidate }
+    if (data && data.to && data.candidate) {
+      io.to(data.to).emit('webrtc:ice', { from: socket.id, candidate: data.candidate });
+    }
+  });
+
+  // Request current user list
+  socket.on('users:request', () => {
+    const list = Array.from(users.entries()).map(([id, info]) => {
+      return { id, user: info.user, discriminator: info.discriminator, color: info.color, bio: info.bio || '' };
+    });
+    socket.emit('users', list);
+  });
+
+  socket.on('disconnect', () => {
+    const info = users.get(socket.id);
+    users.delete(socket.id);
+    console.log('disconnect', socket.id);
+    // notify others
+    socket.broadcast.emit('user:left', { id: socket.id, user: info ? info.user : 'Anon', discriminator: info ? info.discriminator : '0000', timestamp: new Date().toISOString() });
+    emitUserList();
+  });
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log('Server listening on', PORT);
+});
+EOF
+cat > .env.example <<'EOF'
+# Copy to .env to set a custom port
+PORT=3000
+EOF
+cat > public/index.html <<'EOF'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Realtime Social Chat</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="left-panel">
+      <div id="brand">
+        <h1>MiniSocial</h1>
+        <div id="theme-toggle">Theme</div>
+      </div>
+
+      <section id="profile-section">
+        <div id="avatar" role="img" aria-label="avatar"></div>
+        <input id="name" maxlength="32" placeholder="Display name" aria-label="Display name" />
+        <div id="discriminator" title="Discriminator">#0000</div>
+        <textarea id="bio" maxlength="160" placeholder="Short bio (optional)"></textarea>
+        <div id="color-picker">
+          <label>Color</label>
+          <input id="color" type="color" value="#6b6"/>
+        </div>
+        <button id="save-profile">Save Profile</button>
+      </section>
+
+      <section id="users-section">
+        <h3>Online</h3>
+        <ul id="users"></ul>
+      </section>
+    </aside>
+
+    <main id="main-panel">
+      <header id="chat-header">
+        <div id="room-title">Public Chat</div>
+        <div id="status">Connecting...</div>
+      </header>
+
+      <div id="messages" aria-live="polite"></div>
+
+      <div id="composer">
+        <div id="emoji-panel" aria-hidden="true"></div>
+        <textarea id="message" placeholder="Write a message (Enter to send, Shift+Enter newline)"></textarea>
+        <div id="composer-controls">
+          <button id="emoji-toggle" title="Insert emoji">😊</button>
+          <button id="call-btn" title="Start call with selected user">📞</button>
+          <button id="send">Send</button>
+        </div>
+      </div>
+    </main>
+
+    <div id="call-modal" class="hidden" aria-hidden="true">
+      <div id="call-box">
+        <div id="localVideoContainer">
+          <video id="localVideo" autoplay muted playsinline></video>
+        </div>
+        <div id="remoteVideoContainer">
+          <video id="remoteVideo" autoplay playsinline></video>
+        </div>
+        <div id="call-controls">
+          <button id="hangup">Hang Up</button>
+          <button id="mute-audio">Mute</button>
+          <button id="mute-video">Video Off</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/script.js"></script>
+</body>
+</html>
+EOF
+cat > public/style.css <<'EOF'
+/* Minimal responsive layout + themes + chat bubbles */
+
+:root{
+  --bg: #f5f7fb;
+  --panel: #ffffff;
+  --muted: #6b7280;
+  --accent: #0b84ff;
+  --self: #dcf8c6;
+  --other: #ffffff;
+  --maxw: 1100px;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,Arial;background:var(--bg);color:#111}
+#app{display:flex;max-width:var(--maxw);margin:18px auto;gap:12px;padding:12px;width:calc(100% - 40px)}
+
+/* Left panel */
+#left-panel{width:260px;background:var(--panel);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:12px;flex-shrink:0;height:80vh;overflow:auto}
+#brand{display:flex;justify-content:space-between;align-items:center}
+#profile-section{display:flex;flex-direction:column;gap:8px}
+#avatar{width:64px;height:64px;border-radius:12px;background:#ddd}
+#name,#bio{width:100%;padding:8px;border:1px solid #e6e6e6;border-radius:8px}
+#discriminator{font-size:0.9rem;color:var(--muted)}
+#users-section{flex:1;overflow:auto}
+#users{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:8px}
+.user-item{display:flex;align-items:center;gap:8px;padding:8px;border-radius:8px;cursor:pointer}
+.user-item:hover{background:#f3f4f6}
+.user-color{width:28px;height:28px;border-radius:6px}
+
+/* Main panel */
+#main-panel{flex:1;display:flex;flex-direction:column;gap:8px;min-height:80vh}
+#chat-header{display:flex;justify-content:space-between;align-items:center;padding:6px 12px}
+#messages{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:8px;background:transparent;border-radius:8px}
+.msg{max-width:70%;padding:10px;border-radius:12px;box-shadow:0 1px 2px rgba(0,0,0,0.04)}
+.msg .meta{font-size:0.75rem;color:var(--muted);margin-bottom:6px}
+.msg.self{align-self:flex-end;background:var(--self)}
+.msg.other{align-self:flex-start;background:var(--other)}
+.system-note{align-self:center;color:var(--muted);font-size:0.9rem}
+
+/* composer */
+#composer{display:flex;flex-direction:column;gap:6px;background:var(--panel);padding:10px;border-radius:12px}
+#message{width:100%;min-height:56px;padding:8px;border:1px solid #e6e6e6;border-radius:8px;resize:none}
+#composer-controls{display:flex;gap:8px;align-items:center}
+#emoji-panel{display:flex;gap:6px;flex-wrap:wrap;padding:8px;background:#fafafa;border-radius:8px;border:1px solid #eee}
+.hidden{display:none}
+
+/* call modal */
+#call-modal{position:fixed;left:0;top:0;right:0;bottom:0;display:flex;justify-content:center;align-items:center;background:rgba(0,0,0,0.5)}
+#call-box{background:var(--panel);border-radius:12px;padding:12px;display:flex;gap:12px}
+#localVideoContainer video,#remoteVideoContainer video{width:320px;height:240px;background:#000;border-radius:8px;object-fit:cover}
+#call-controls{display:flex;gap:8px;justify-content:center}
+
+/* small screens */
+@media (max-width:900px){
+  #left-panel{display:none}
+  #app{padding:8px}
+  #localVideoContainer video,#remoteVideoContainer video{width:200px;height:150px}
+}
+EOF
+cat > public/script.js <<'EOF'
+// script.js - client logic for realtime social chat with WebRTC 1:1 calls
+
+(() => {
+  const socket = io();
+
+  // DOM
+  const statusEl = document.getElementById('status');
+  const usersListEl = document.getElementById('users');
+  const messagesEl = document.getElementById('messages');
+  const nameInput = document.getElementById('name');
+  const discEl = document.getElementById('discriminator');
+  const bioInput = document.getElementById('bio');
+  const colorInput = document.getElementById('color');
+  const avatarEl = document.getElementById('avatar');
+  const saveProfileBtn = document.getElementById('save-profile');
+  const messageInput = document.getElementById('message');
+  const sendBtn = document.getElementById('send');
+  const emojiToggle = document.getElementById('emoji-toggle');
+  const emojiPanel = document.getElementById('emoji-panel');
+  const emojiContainer = emojiPanel;
+  const callBtn = document.getElementById('call-btn');
+  const usersSection = document.getElementById('users-section');
+
+  // Call modal elements
+  const callModal = document.getElementById('call-modal');
+  const localVideo = document.getElementById('localVideo');
+  const remoteVideo = document.getElementById('remoteVideo');
+  const hangupBtn = document.getElementById('hangup');
+  const muteAudioBtn = document.getElementById('mute-audio');
+  const muteVideoBtn = document.getElementById('mute-video');
+
+  // Helpers
+  const USER_KEY = 'mini_social_profile_v1';
+  function randomDiscriminator() {
+    // produce 4 hex digits, e.g. 1a2b => #1a2b
+    const n = Math.floor(Math.random() * 0xffff);
+    return ('0000' + n.toString(16)).slice(-4);
+  }
+  function saveProfileToLocal(profile) {
+    localStorage.setItem(USER_KEY, JSON.stringify(profile));
+  }
+  function loadProfileFromLocal() {
+    try {
+      const s = localStorage.getItem(USER_KEY);
+      if (!s) return null;
+      return JSON.parse(s);
+    } catch { return null; }
+  }
+
+  function generateDefaultProfile() {
+    const prof = {
+      user: 'User-' + Math.random().toString(36).slice(2,8),
+      discriminator: randomDiscriminator(),
+      color: '#'+Math.floor(Math.random()*16777215).toString(16).padStart(6,'0'),
+      bio: ''
+    };
+    saveProfileToLocal(prof);
+    return prof;
+  }
+
+  // Initialize profile UI
+  let profile = loadProfileFromLocal();
+  if (!profile) profile = generateDefaultProfile();
+  nameInput.value = profile.user;
+  discEl.textContent = '#' + profile.discriminator;
+  bioInput.value = profile.bio || '';
+  colorInput.value = profile.color;
+  avatarEl.style.background = profile.color;
+
+  // Save profile and inform server
+  function pushProfile() {
+    profile.user = nameInput.value.trim().slice(0,32) || profile.user;
+    profile.discriminator = profile.discriminator || randomDiscriminator();
+    profile.color = colorInput.value || profile.color;
+    profile.bio = bioInput.value.slice(0,160);
+    saveProfileToLocal(profile);
+    socket.emit('profile:update', profile);
+  }
+  saveProfileBtn.addEventListener('click', () => {
+    pushProfile();
+  });
+
+  // Auto push on change
+  [nameInput, bioInput, colorInput].forEach(el => {
+    el.addEventListener('change', () => pushProfile());
+  });
+
+  // Show status
+  socket.on('connect', () => {
+    statusEl.textContent = 'Connected';
+    pushProfile();
+    socket.emit('users:request');
+  });
+  socket.on('disconnect', () => {
+    statusEl.textContent = 'Disconnected';
+  });
+
+  // Display user list
+  let users = [];
+  function renderUsers(list) {
+    users = list || [];
+    usersListEl.innerHTML = '';
+    users.forEach(u => {
+      const li = document.createElement('li');
+      li.className = 'user-item';
+      li.dataset.id = u.id;
+
+      const color = document.createElement('div');
+      color.className = 'user-color';
+      color.style.background = u.color || '#888';
+
+      const label = document.createElement('div');
+      label.innerHTML = '<strong>' + escapeHtml(u.user) + '</strong> <span style="color:var(--muted)">#' + escapeHtml(u.discriminator) + '</span>';
+      const bio = document.createElement('div');
+      bio.style.fontSize = '0.85rem';
+      bio.style.color = 'var(--muted)';
+      bio.textContent = u.bio || '';
+
+      li.appendChild(color);
+      const col = document.createElement('div');
+      col.style.display = 'flex';
+      col.style.flexDirection = 'column';
+      col.appendChild(label);
+      col.appendChild(bio);
+      li.appendChild(col);
+
+      li.addEventListener('click', () => {
+        // select user for 1:1 call
+        selectedTarget = u;
+        highlightSelectedUser(u.id);
+      });
+
+      usersListEl.appendChild(li);
+    });
+  }
+
+  function highlightSelectedUser(id) {
+    Array.from(usersListEl.querySelectorAll('.user-item')).forEach(it => it.style.background = it.dataset.id === id ? '#eef' : '');
+  }
+
+  socket.on('users', (list) => {
+    renderUsers(list.filter(u => u.id !== socket.id));
+  });
+
+  socket.on('user:joined', (p) => {
+    appendSystem(`${p.user} joined`);
+    socket.emit('users:request');
+  });
+  socket.on('user:left', (p) => {
+    appendSystem(`${p.user} left`);
+    socket.emit('users:request');
+  });
+
+  // Chat messages
+  function appendMessage(msg, me=false) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + (me ? 'self' : 'other');
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = (msg.user ? msg.user : 'Anon') + ' #' + (msg.discriminator || '0000') + ' • ' + formatTime(msg.timestamp);
+
+    const body = document.createElement('div');
+    body.className = 'body';
+    body.innerText = msg.text;
+
+    div.appendChild(meta);
+    div.appendChild(body);
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  function appendSystem(text) {
+    const div = document.createElement('div');
+    div.className = 'system-note';
+    div.textContent = text;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  socket.on('chat:message', (msg) => {
+    const me = (loadProfileFromLocal() && msg.user === loadProfileFromLocal().user && msg.discriminator === loadProfileFromLocal().discriminator);
+    appendMessage(msg, me);
+  });
+
+  // Send message
+  function sendMessage() {
+    const txt = messageInput.value;
+    if (!txt || !txt.trim()) return;
+    const payload = { text: txt.trim() };
+    socket.emit('chat:message', payload);
+    messageInput.value = '';
+  }
+  sendBtn.addEventListener('click', sendMessage);
+  messageInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  // Typing indicator
+  let typingTimer = null;
+  messageInput.addEventListener('input', () => {
+    socket.emit('chat:typing', true);
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => {
+      socket.emit('chat:typing', false);
+    }, 800);
+  });
+  socket.on('chat:typing', (data) => {
+    if (data && data.typing) {
+      statusEl.textContent = data.user + ' is typing…';
+    } else {
+      statusEl.textContent = 'Connected';
+    }
+  });
+
+  // Emoji panel (simple set)
+  const EMOJIS = ['😀','😅','😂','😊','😍','😭','😡','👍','👎','🙏','🔥','🎉','🤝','😎','🤖','💬'];
+  function buildEmojiPanel() {
+    emojiContainer.innerHTML = '';
+    EMOJIS.forEach(e => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'emoji-btn';
+      b.textContent = e;
+      b.style.fontSize = '1.2rem';
+      b.style.border = 'none';
+      b.style.background = 'transparent';
+      b.addEventListener('click', () => {
+        messageInput.value += e;
+        messageInput.focus();
+      });
+      emojiContainer.appendChild(b);
+    });
+  }
+  buildEmojiPanel();
+  emojiToggle.addEventListener('click', () => {
+    emojiPanel.classList.toggle('hidden');
+  });
+
+  // Simple utilities
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function formatTime(iso) {
+    try { const d = new Date(iso); return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); } catch { return ''; }
+  }
+
+  // ------------------------------
+  // WebRTC: 1:1 call flow (peer-to-peer)
+  // ------------------------------
+  let pc = null;
+  let localStream = null;
+  let remoteStream = null;
+  let selectedTarget = null;
+  const STUN_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] };
+
+  // call initiation: click call button
+  callBtn.addEventListener('click', async () => {
+    if (!selectedTarget) { alert('Select a user from the online list to call (click their name).'); return; }
+    if (selectedTarget.id === socket.id) { alert("You can't call yourself."); return; }
+    startCall(selectedTarget.id);
+  });
+
+  async function startCall(targetId) {
+    try {
+      // get local media
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      localVideo.srcObject = localStream;
+
+      pc = new RTCPeerConnection(STUN_CONFIG);
+
+      // add local tracks
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+      // remote stream
+      remoteStream = new MediaStream();
+      remoteVideo.srcObject = remoteStream;
+      pc.ontrack = (evt) => {
+        evt.streams[0].getTracks().forEach(track => remoteStream.addTrack(track));
+      };
+
+      // ice candidates -> server -> target peer
+      pc.onicecandidate = (evt) => {
+        if (evt.candidate) {
+          socket.emit('webrtc:ice', { to: targetId, candidate: evt.candidate });
+        }
+      };
+
+      // create offer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // send offer via signaling
+      socket.emit('webrtc:offer', { to: targetId, offer });
+
+      // show call UI
+      openCallModal();
+    } catch (err) {
+      console.error('startCall error', err);
+      alert('Could not start call: ' + (err.message || err));
+    }
+  }
+
+  // When receiving an offer
+  socket.on('webrtc:offer', async ({ from, offer }) => {
+    // Ask user to accept the incoming call
+    const accept = confirm('Incoming call from ' + (from) + '. Accept?');
+    if (!accept) {
+      return;
+    }
+
+    // prepare local stream and peer connection
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      localVideo.srcObject = localStream;
+
+      pc = new RTCPeerConnection(STUN_CONFIG);
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      remoteStream = new MediaStream();
+      remoteVideo.srcObject = remoteStream;
+      pc.ontrack = (evt) => {
+        evt.streams[0].getTracks().forEach(track => remoteStream.addTrack(track));
+      };
+      pc.onicecandidate = (evt) => {
+        if (evt.candidate) {
+          socket.emit('webrtc:ice', { to: from, candidate: evt.candidate });
+        }
+      };
+
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit('webrtc:answer', { to: from, answer });
+
+      openCallModal();
+    } catch (err) {
+      console.error('accept offer error', err);
+      alert('Could not accept call: ' + (err.message || err));
+    }
+  });
+
+  // When receiving answer to our offer
+  socket.on('webrtc:answer', async ({ from, answer }) => {
+    if (!pc) return;
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    } catch (err) {
+      console.warn('setRemoteDescription error', err);
+    }
+  });
+
+  // When receiving ice candidate
+  socket.on('webrtc:ice', async ({ from, candidate }) => {
+    if (!pc) return;
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (err) {
+      console.warn('addIceCandidate error', err);
+    }
+  });
+
+  // Call UI controls
+  function openCallModal() {
+    callModal.classList.remove('hidden');
+    callModal.setAttribute('aria-hidden', 'false');
+    // when modal open, make sure buttons work
+  }
+  function closeCallModal() {
+    callModal.classList.add('hidden');
+    callModal.setAttribute('aria-hidden', 'true');
+    // stop local stream tracks
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+    }
+    if (pc) {
+      try { pc.close(); } catch {}
+      pc = null;
+    }
+    // clear videos
+    localVideo.srcObject = null;
+    remoteVideo.srcObject = null;
+  }
+
+  hangupBtn.addEventListener('click', () => {
+    // send nothing special — just close local side; peer will detect disconnect if peer connection closes
+    closeCallModal();
+  });
+
+  muteAudioBtn.addEventListener('click', () => {
+    if (!localStream) return;
+    const audioTrack = localStream.getAudioTracks()[0];
+    if (!audioTrack) return;
+    audioTrack.enabled = !audioTrack.enabled;
+    muteAudioBtn.textContent = audioTrack.enabled ? 'Mute' : 'Unmute';
+  });
+
+  muteVideoBtn.addEventListener('click', () => {
+    if (!localStream) return;
+    const videoTrack = localStream.getVideoTracks()[0];
+    if (!videoTrack) return;
+    videoTrack.enabled = !videoTrack.enabled;
+    muteVideoBtn.textContent = videoTrack.enabled ? 'Video Off' : 'Video On';
+  });
+
+  // ------------------------------
+  // Misc UI: avatar color preview and save behavior
+  // ------------------------------
+  colorInput.addEventListener('input', () => {
+    avatarEl.style.background = colorInput.value;
+  });
+
+  // initial push
+  pushProfile();
+
+  // Expose a small debug function to show local profile in console
+  window.__miniSocial = { getProfile: () => loadProfileFromLocal() };
+
+})();
+EOF
+cat > .gitignore <<'EOF'
+node_modules
+.env
+.DS_Store
+EOF
+npm install
+npm run dev
+npm start
+git remote add origin <your-github-ssh-or-https-url>
+git branch -M main
+git push -u origin main

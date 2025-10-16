@@ -1,4 +1,4 @@
-/ 
+/
 ├── package.json
 ├── server.js
 ├── Procfile
@@ -8,6 +8,23 @@
     ├── index.html
     ├── style.css
     └── script.js
+{
+  "name": "mhjhchat2",
+  "version": "1.0.0",
+  "description": "Real-time chat app with nicknames, emojis, and online user tracking",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
 import express from "express";
 import http from "http";
 import { Server } from "socket.io";
@@ -18,7 +35,7 @@ const io = new Server(server);
 
 app.use(express.static("public"));
 
-// Random discriminator (#0000)
+// Random discriminator like #0000
 function randomDiscriminator() {
   return "#" + Math.floor(1000 + Math.random() * 9000);
 }
@@ -31,7 +48,6 @@ io.on("connection", (socket) => {
   socket.on("join", (nickname) => {
     const tag = randomDiscriminator();
     users[socket.id] = { nickname, tag };
-
     io.emit("user-joined", { nickname, tag });
     io.emit("user-list", Object.values(users));
     console.log(`👤 ${nickname}${tag} joined`);
@@ -59,52 +75,56 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
-node_modules
-.env
-.DS_Store
-web: node server.js
-name: mhjhchat2
-build:
-  type: buildpack
-  buildpack: nodejs
-run:
-  cmd: "npm start"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MHJH Chat 💬</title>
-  <link rel="stylesheet" href="style.css" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💬</text></svg>">
-</head>
-<body>
-  <div id="login-screen">
-    <h2>Enter a nickname</h2>
-    <input id="nickname" placeholder="Nickname" maxlength="16" />
-    <button id="join-btn">Join Chat</button>
-  </div>
+import express from "express";
+import http from "http";
+import { Server } from "socket.io";
 
-  <div id="chat-screen" class="hidden">
-    <header>
-      <h2>MHJH Chat 💬</h2>
-      <div id="online-users"></div>
-    </header>
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
 
-    <main id="chat-box"></main>
+app.use(express.static("public"));
 
-    <div id="typing"></div>
+// Random discriminator like #0000
+function randomDiscriminator() {
+  return "#" + Math.floor(1000 + Math.random() * 9000);
+}
 
-    <footer>
-      <input id="message" placeholder="Type a message..." />
-      <button id="send-btn">Send</button>
-    </footer>
-  </div>
+const users = {};
 
-  <script src="/socket.io/socket.io.js"></script>
-  <script src="script.js"></script>
-</body>
-</html>
+io.on("connection", (socket) => {
+  console.log("🟢 Connected:", socket.id);
+
+  socket.on("join", (nickname) => {
+    const tag = randomDiscriminator();
+    users[socket.id] = { nickname, tag };
+    io.emit("user-joined", { nickname, tag });
+    io.emit("user-list", Object.values(users));
+    console.log(`👤 ${nickname}${tag} joined`);
+  });
+
+  socket.on("chat-message", (data) => {
+    const cleanMsg = String(data.msg).substring(0, 500);
+    io.emit("chat-message", { nickname: data.nickname, msg: cleanMsg });
+  });
+
+  socket.on("typing", (nickname) => {
+    socket.broadcast.emit("typing", nickname);
+  });
+
+  socket.on("disconnect", () => {
+    const user = users[socket.id];
+    if (user) {
+      delete users[socket.id];
+      io.emit("user-left", user);
+      io.emit("user-list", Object.values(users));
+      console.log(`🔴 ${user.nickname}${user.tag} left`);
+    }
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
 const socket = io();
 const loginScreen = document.getElementById("login-screen");
 const chatScreen = document.getElementById("chat-screen");
@@ -244,3 +264,13 @@ footer {
   margin-left: 8px;
   cursor: pointer;
 }
+web: node server.js
+name: mhjhchat2
+type: web
+build:
+  type: buildpack
+run:
+  cmd: npm start
+node_modules
+.env
+.DS_Store
